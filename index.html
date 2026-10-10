@@ -5833,6 +5833,131 @@ const CHEEMS_FRAMES = {
      * 6. THEORETICAL COMPLEXITY & METRICS CALCULATOR
      * =========================================================================
      */
+    /* =========================================================================
+     * RANDOM VALUE GENERATORS & STAGE CONFIGURATION
+     * ========================================================================= */
+    function mulberry32(a) {
+      return function() {
+        let t = a += 0x6D2B79F5;
+        t = Math.imul(t ^ (t >>> 15), t | 1);
+        t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+        return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+      };
+    }
+
+    let rng = Math.random;
+    try {
+      const urlParams = new URLSearchParams(window.location.search);
+      const seedParam = urlParams.get('seed');
+      if (seedParam !== null && !isNaN(parseInt(seedParam, 10))) {
+        rng = mulberry32(parseInt(seedParam, 10) >>> 0);
+      }
+    } catch (e) {}
+
+    function setSeed(s) {
+      rng = mulberry32(s >>> 0);
+    }
+
+    const STAGE_CONFIG = {
+      insertion: { count: 8 },
+      merge: { perTray: 4 },
+      quick: { count: 7 },
+      min: 10,
+      max: 99
+    };
+
+    function shuffle(arr) {
+      const a = [...arr];
+      for (let i = a.length - 1; i > 0; i--) {
+        const j = Math.floor(rng() * (i + 1));
+        [a[i], a[j]] = [a[j], a[i]];
+      }
+      return a;
+    }
+
+    function uniqueValues(n, min, max, minGap = 3) {
+      const maxReduced = max - (n - 1) * (minGap - 1);
+      if (maxReduced < min) {
+        const res = [];
+        for (let i = 0; i < n; i++) res.push(min + i * minGap);
+        return shuffle(res);
+      }
+      const pool = [];
+      for (let v = min; v <= maxReduced; v++) pool.push(v);
+      const picked = [];
+      for (let i = 0; i < n; i++) {
+        const idx = Math.floor(rng() * pool.length);
+        picked.push(pool[idx]);
+        pool[idx] = pool[pool.length - 1];
+        pool.pop();
+      }
+      picked.sort((a, b) => a - b);
+      const result = picked.map((y, i) => y + i * (minGap - 1));
+      return shuffle(result);
+    }
+
+    function countInversions(arr) {
+      let inv = 0;
+      for (let i = 0; i < arr.length; i++) {
+        for (let j = i + 1; j < arr.length; j++) {
+          if (arr[i] > arr[j]) inv++;
+        }
+      }
+      return inv;
+    }
+
+    function countMergeSwitches(trayA, trayB) {
+      let i = 0, j = 0;
+      let lastSource = null;
+      let switches = 0;
+      while (i < trayA.length && j < trayB.length) {
+        let source = (trayA[i] < trayB[j]) ? 'A' : 'B';
+        if (source === 'A') i++;
+        else j++;
+        if (lastSource !== null && source !== lastSource) switches++;
+        lastSource = source;
+      }
+      while (i < trayA.length) {
+        if (lastSource !== null && lastSource !== 'A') { switches++; lastSource = 'A'; }
+        i++;
+      }
+      while (j < trayB.length) {
+        if (lastSource !== null && lastSource !== 'B') { switches++; lastSource = 'B'; }
+        j++;
+      }
+      return switches;
+    }
+
+    function generateInsertionData() {
+      for (let attempt = 0; attempt < 50; attempt++) {
+        const vals = uniqueValues(STAGE_CONFIG.insertion.count, STAGE_CONFIG.min, STAGE_CONFIG.max, 3);
+        const inv = countInversions(vals);
+        if (inv >= 8 && inv <= 20) return vals;
+      }
+      return [42, 17, 88, 29, 63, 11, 75, 50];
+    }
+
+    function generateMergeData() {
+      for (let attempt = 0; attempt < 50; attempt++) {
+        const vals = uniqueValues(STAGE_CONFIG.merge.perTray * 2, STAGE_CONFIG.min, STAGE_CONFIG.max, 3);
+        const shuffled = shuffle(vals);
+        const trayA = shuffled.slice(0, STAGE_CONFIG.merge.perTray).sort((a, b) => a - b);
+        const trayB = shuffled.slice(STAGE_CONFIG.merge.perTray).sort((a, b) => a - b);
+        if (countMergeSwitches(trayA, trayB) >= 3) {
+          return { channelA: trayA, channelB: trayB };
+        }
+      }
+      return { channelA: [14, 28, 45, 60], channelB: [11, 25, 49, 72] };
+    }
+
+    function generateQuickData() {
+      for (let attempt = 0; attempt < 50; attempt++) {
+        const vals = uniqueValues(STAGE_CONFIG.quick.count, STAGE_CONFIG.min, STAGE_CONFIG.max, 3);
+        if (vals.length === STAGE_CONFIG.quick.count) return vals;
+      }
+      return [55, 18, 92, 34, 71, 12, 48];
+    }
+
     const MetricsCalc = {
       countInversions(arr) {
         let inv = 0;
@@ -5925,7 +6050,8 @@ const CHEEMS_FRAMES = {
         leftBuffer: [],
         rightBuffer: [],
         phase: 'select_pivot',
-        totalPackets: 0
+        totalPackets: 0,
+        starTimer: null
       },
 
       // Simulator State
@@ -6354,6 +6480,11 @@ const CHEEMS_FRAMES = {
       if (DOM.reconstructOverlay) DOM.reconstructOverlay.classList.remove('active');
       document.body.classList.remove('screen-shake', 'dragging-candy');
 
+      if (AppState.quick && AppState.quick.starTimer) {
+        clearTimeout(AppState.quick.starTimer);
+        AppState.quick.starTimer = null;
+      }
+
       const tray = document.getElementById('insertionTray');
       if (tray) tray.classList.remove('cracked');
       const conveyor = document.getElementById('insertionConveyor');
@@ -6448,13 +6579,13 @@ const CHEEMS_FRAMES = {
 
       updateMetrics() {
         try {
-          const insM = MetricsCalc.calcInsertionTheoretical([42, 17, 88, 29, 63, 11, 75, 50]).minMoves;
+          const insM = MetricsCalc.calcInsertionTheoretical(new Array(STAGE_CONFIG.insertion.count).fill(0)).minMoves;
           if (DOM.bestOpsInsertion) DOM.bestOpsInsertion.textContent = insM;
 
-          const mrgM = MetricsCalc.calcMergeTheoretical([12, 33, 54, 78], [19, 45, 62, 91]).minMoves;
+          const mrgM = MetricsCalc.calcMergeTheoretical(new Array(STAGE_CONFIG.merge.perTray).fill(0), new Array(STAGE_CONFIG.merge.perTray).fill(0)).minMoves;
           if (DOM.bestOpsMerge) DOM.bestOpsMerge.textContent = mrgM;
 
-          const qkM = MetricsCalc.calcQuickPartitionTheoretical([55, 18, 92, 34, 71, 12, 48], 48).minMoves;
+          const qkM = MetricsCalc.calcQuickPartitionTheoretical(new Array(STAGE_CONFIG.quick.count).fill(0), 0).minMoves;
           if (DOM.bestOpsQuick) DOM.bestOpsQuick.textContent = qkM;
         } catch (e) {}
       },
@@ -6620,7 +6751,7 @@ const CHEEMS_FRAMES = {
 
     // --- MODE 1: INSERTION SORT (STREAM INGESTION) ---
     function initInsertionMode() {
-      const streamData = [42, 17, 88, 29, 63, 11, 75, 50];
+      const streamData = generateInsertionData();
       const initialPlaced = streamData[0];
       const pendingStream = streamData.slice(1);
 
@@ -6776,8 +6907,9 @@ const CHEEMS_FRAMES = {
 
     // --- MODE 2: MERGE SORT (DUAL-CHANNEL FUSION) ---
     function initMergeMode() {
-      const channelA = [14, 28, 45, 60];
-      const channelB = [11, 25, 49, 72];
+      const data = generateMergeData();
+      const channelA = [...data.channelA];
+      const channelB = [...data.channelB];
 
       AppState.merge.channelAlpha = [...channelA];
       AppState.merge.channelBeta = [...channelB];
@@ -6913,7 +7045,11 @@ const CHEEMS_FRAMES = {
 
     // --- MODE 3: QUICK SORT (BATCH PARTITION) ---
     function initQuickMode() {
-      const batch = [55, 18, 92, 34, 71, 12, 48];
+      if (AppState.quick && AppState.quick.starTimer) {
+        clearTimeout(AppState.quick.starTimer);
+        AppState.quick.starTimer = null;
+      }
+      const batch = generateQuickData();
       AppState.quick.batchPool = [...batch];
       AppState.quick.selectedPivot = null;
       AppState.quick.leftBuffer = [];
@@ -6928,7 +7064,7 @@ const CHEEMS_FRAMES = {
       AppState.bufferHealth = 100;
       AppState.combo = 1;
 
-      const theo = MetricsCalc.calcQuickPartitionTheoretical(batch, 48);
+      const theo = MetricsCalc.calcQuickPartitionTheoretical(batch, 0);
       AppState.theoreticalMinOps = theo.minComparisons + theo.minMoves;
 
       updateTelemetryHUD();
@@ -6936,14 +7072,20 @@ const CHEEMS_FRAMES = {
       startTimer();
       appendLog('info', `A pile of ${batch.length} candies arrived. The machine is crowning the golden star candy.`);
 
-      // Pick star at random excluding smallest (12) and biggest (92)
-      const minVal = Math.min(...batch);
-      const maxVal = Math.max(...batch);
-      const candidates = batch.filter(v => v !== minVal && v !== maxVal);
-      const chosenPivot = candidates[Math.floor(Math.random() * candidates.length)];
-
-      setTimeout(() => {
+      AppState.quick.starTimer = setTimeout(() => {
+        AppState.quick.starTimer = null;
         if (AppState.currentAlgo !== 'quick' || AppState.quick.phase !== 'drawing_star') return;
+
+        const currentPool = [...AppState.quick.batchPool];
+        if (currentPool.length === 0) return;
+        const sortedPool = [...currentPool].sort((a, b) => a - b);
+        const eligibleIndices = [2, 3, 4].filter(idx => idx < sortedPool.length);
+        const chosenRank = eligibleIndices.length > 0
+          ? eligibleIndices[Math.floor(rng() * eligibleIndices.length)]
+          : Math.floor(sortedPool.length / 2);
+        const chosenPivot = sortedPool[chosenRank];
+        if (!AppState.quick.batchPool.includes(chosenPivot)) return;
+
         choosePivot(chosenPivot);
         renderQuickUI();
       }, 900);
@@ -7149,28 +7291,63 @@ const CHEEMS_FRAMES = {
       }
     }
 
+    function chooseRandomSubset(pool, k) {
+      const copy = [...pool];
+      for (let i = copy.length - 1; i > 0; i--) {
+        const j = Math.floor(rng() * (i + 1));
+        [copy[i], copy[j]] = [copy[j], copy[i]];
+      }
+      return copy.slice(0, k);
+    }
+
     function generateSimDataset(preset, size) {
-      const pool = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
+      const allNums = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
       let arr = [];
 
       if (preset === 'random') {
-        const shuffled = [...pool].sort(() => Math.random() - 0.5);
-        arr = shuffled.slice(0, size);
-      } else if (preset === 'nearlySorted') {
-        arr = pool.slice(0, size);
-        const a = Math.floor(size / 3);
-        const b = a + 1;
-        if (b < size) {
-          [arr[a], arr[b]] = [arr[b], arr[a]];
+        arr = chooseRandomSubset(allNums, size);
+        let attempts = 0;
+        while (attempts < 20 && arr.every((v, i) => i === 0 || v >= arr[i - 1])) {
+          arr = shuffle(arr);
+          attempts++;
         }
+        if (arr.every((v, i) => i === 0 || v >= arr[i - 1]) && size >= 2) {
+          [arr[0], arr[1]] = [arr[1], arr[0]];
+        }
+      } else if (preset === 'nearlySorted') {
+        const picked = chooseRandomSubset(allNums, size);
+        picked.sort((a, b) => a - b);
+        if (size >= 2) {
+          const idx = Math.floor(rng() * (size - 1));
+          [picked[idx], picked[idx + 1]] = [picked[idx + 1], picked[idx]];
+        }
+        arr = picked;
       } else if (preset === 'reverse') {
-        arr = pool.slice(11 - size, 11).reverse();
+        const picked = chooseRandomSubset(allNums, size);
+        picked.sort((a, b) => b - a);
+        arr = picked;
       } else if (preset === 'duplicates') {
-        const dupPool = [2, 4, 7, 9, 11];
-        for (let i = 0; i < size; i++) arr.push(dupPool[i % dupPool.length]);
-        arr.sort(() => Math.random() - 0.5);
+        const baseVals = chooseRandomSubset(allNums, 2);
+        arr = [baseVals[0], baseVals[0], baseVals[1], baseVals[1]];
+        while (arr.length < size) {
+          arr.push(1 + Math.floor(rng() * 11));
+        }
+        arr = shuffle(arr);
+        let attempts = 0;
+        while (attempts < 20 && arr.every((v, i) => i === 0 || v >= arr[i - 1])) {
+          arr = shuffle(arr);
+          attempts++;
+        }
+        if (arr.every((v, i) => i === 0 || v >= arr[i - 1]) && size >= 2) {
+          for (let i = 0; i < size - 1; i++) {
+            if (arr[i] !== arr[i + 1]) {
+              [arr[i], arr[i + 1]] = [arr[i + 1], arr[i]];
+              break;
+            }
+          }
+        }
       } else {
-        arr = pool.slice(0, size);
+        arr = chooseRandomSubset(allNums, size).sort((a, b) => a - b);
       }
       return arr;
     }
@@ -7571,6 +7748,10 @@ const CHEEMS_FRAMES = {
      * =========================================================================
      */
     function switchAlgorithm(algoKey) {
+      if (AppState.quick && AppState.quick.starTimer) {
+        clearTimeout(AppState.quick.starTimer);
+        AppState.quick.starTimer = null;
+      }
       AppState.currentAlgo = algoKey;
 
       const stageIcons = { insertion: '🍭', merge: '🥣', quick: '⭐' };
@@ -7780,42 +7961,6 @@ const CHEEMS_FRAMES = {
 
         if (e.key === 'm' || e.key === 'M') {
           DOM.soundToggleBtn.click();
-        }
-
-        if (AppState.currentMode === 'play') {
-          if (!GameState.isPlayable()) return;
-
-          if (AppState.currentAlgo === 'insertion') {
-            const maxSlot = AppState.insertion.sortedBuffer.length;
-            if (e.key === 'ArrowLeft') {
-              e.preventDefault();
-              AppState.selectedSlotIndex = Math.max(0, AppState.selectedSlotIndex - 1);
-              renderInsertionUI();
-            } else if (e.key === 'ArrowRight') {
-              e.preventDefault();
-              AppState.selectedSlotIndex = Math.min(maxSlot, AppState.selectedSlotIndex + 1);
-              renderInsertionUI();
-            } else if (e.key === 'Enter') {
-              e.preventDefault();
-              handleInsertionAttempt(AppState.selectedSlotIndex);
-            }
-          }
-
-          if (AppState.currentAlgo === 'merge') {
-            if (e.key === 'a' || e.key === 'A' || e.key === 'ArrowLeft') {
-              dispatchChannel('alpha');
-            } else if (e.key === 'b' || e.key === 'B' || e.key === 'ArrowRight') {
-              dispatchChannel('beta');
-            }
-          }
-
-          if (AppState.currentAlgo === 'quick' && AppState.quick.phase === 'partition') {
-            if (e.key === '1' || e.key === 'ArrowLeft') {
-              routeQuickPacket('left');
-            } else if (e.key === '2' || e.key === 'ArrowRight') {
-              routeQuickPacket('right');
-            }
-          }
         }
       });
     }
